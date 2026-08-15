@@ -1,0 +1,17 @@
+# Environment Variables
+.env
+
+# Virtual Environment
+venv/
+env/
+
+# Fakturama Data
+Database/
+Templates/
+@AutomationLog.txt
+fakturamaviews.properties
+inspector.py
+
+# Python Cache
+__pycache__/
+*.pyc
