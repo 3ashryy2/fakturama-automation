@@ -2,9 +2,7 @@
 
 Annotated captures from live runs against Fakturama 2.2.0.
 
-All images are taken with `PrintWindow` (window-owned pixels), not a screen
-grab, so they are correct even when the application is partly covered — which
-is also how the automation verifies grids while other windows are in front.
+All images are taken with `PrintWindow` (window-owned pixels), not a screen grab, so they are correct even when the application is partly covered — which is also how the automation verifies grids while other windows are in front.
 
 | Image | What it shows |
 |---|---|
