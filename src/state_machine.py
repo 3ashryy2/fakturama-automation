@@ -1,63 +1,59 @@
-from statemachine import StateMachine, State
+"""
+The Order-first flow as an explicit state machine.
 
-class FakturamaAutomation(StateMachine):
-    """
-    State machine controlling the 'Order-first' flow through Fakturama.
-    """
-    # Define States
-    extracting_image = State(initial=True)
-    initializing_order = State()
-    searching_debtor = State()
-    creating_debtor = State()
-    searching_product = State()
-    verifying_vat = State()
-    creating_product = State()
-    adding_line_items = State()
-    verifying_order = State()
-    generating_invoice = State()
-    completed = State(final=True)
-    
-    # Error / Manual Intervention State
-    manual_review_required = State(final=True)
+Its job is not to perform the work -- ui_driver.py does that -- but to make the
+legal orderings explicit and to refuse illegal ones. The valuable property here
+is that resolving missing master data is a *detour*: creating a Debtor, a
+payment method, a VAT rate or a Product suspends the Order and must return to
+it. Encoding that as transitions means a detour which never comes back raises
+immediately rather than quietly leaving the run in a half-built Order.
+"""
 
-    # 1. Extraction -> Order Start
-    validate_extraction = extracting_image.to(initializing_order)
-    
-    # 2. Debtor Handling
-    start_debtor_search = initializing_order.to(searching_debtor)
-    debtor_found = searching_debtor.to(searching_product)
-    debtor_missing = searching_debtor.to(creating_debtor)
-    debtor_created = creating_debtor.to(searching_debtor)  # Loop back to search after creation
-    
-    # 3. Product Handling (Loops per item)
-    product_found = searching_product.to(adding_line_items)
-    product_missing = searching_product.to(verifying_vat)
-    
-    vat_verified = verifying_vat.to(creating_product)
-    vat_missing = verifying_vat.to(verifying_vat) # Internal logic will create VAT then self-transition
-    
-    product_created = creating_product.to(searching_product) # Loop back to search after creation
-    
-    # 4. Item Completion
-    line_item_added = adding_line_items.to(searching_product) # Next item loop
-    all_items_added = adding_line_items.to(verifying_order)
-    
-    # 5. Order & Invoice Completion
-    order_verified = verifying_order.to(generating_invoice)
-    invoice_verified = generating_invoice.to(completed)
+from __future__ import annotations
 
-    # 6. Global Error Fallback
-    # All non-final states can trigger a manual review on UI failure or ambiguity
-    trigger_manual_review = (
-        extracting_image.to(manual_review_required) |
-        searching_debtor.to(manual_review_required) |
-        creating_debtor.to(manual_review_required) |
-        searching_product.to(manual_review_required) |
-        verifying_vat.to(manual_review_required) |
-        generating_invoice.to(manual_review_required)
+from statemachine import State, StateMachine
+
+
+class FakturamaFlow(StateMachine):
+    # -- states -----------------------------------------------------------
+    extracting = State(initial=True)
+    order_open = State()
+    debtor_pending = State()
+    debtor_creating = State()
+    debtor_ready = State()
+    items_pending = State()
+    order_complete = State()
+    invoice_open = State()
+    done = State(final=True)
+    halted = State(final=True)
+
+    # -- 1: extraction to an open Order -----------------------------------
+    extracted = extracting.to(order_open)
+    order_opened = order_open.to(debtor_pending)
+
+    # -- 2: Debtor, with a creation detour --------------------------------
+    debtor_missing = debtor_pending.to(debtor_creating)
+    debtor_created = debtor_creating.to(debtor_pending)
+    debtor_resolved = debtor_pending.to(debtor_ready) | debtor_ready.to(items_pending)
+
+    # -- 3: items ---------------------------------------------------------
+    items_complete = (
+        items_pending.to(order_complete)
+        | debtor_ready.to(order_complete)
     )
 
-    # Example callback hooking into UI logic
-    def on_enter_searching_debtor(self):
-        print("[System] Entering Debtor Search Context in UIA...")
-        # UI logic to focus the address search window goes here.
+    # -- 4 and 5 ----------------------------------------------------------
+    order_saved = order_complete.to(invoice_open)
+    invoice_saved = invoice_open.to(done)
+
+    # -- stop-for-manual-review, legal from any working state -------------
+    halt = (
+        extracting.to(halted)
+        | order_open.to(halted)
+        | debtor_pending.to(halted)
+        | debtor_creating.to(halted)
+        | debtor_ready.to(halted)
+        | items_pending.to(halted)
+        | order_complete.to(halted)
+        | invoice_open.to(halted)
+    )

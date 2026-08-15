@@ -1,17 +1,39 @@
-# Environment Variables
+# Secrets and environment
 .env
-
-# Virtual Environment
 venv/
 env/
 
-# Fakturama Data
-Database/
-Templates/
-@AutomationLog.txt
-fakturamaviews.properties
-inspector.py
-
-# Python Cache
+# Python
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Fakturama runtime workspace.
+# This repo doubles as the application's workspace, so the app writes its
+# database, logs, backups and templates in here. None of it is source.
+Database/
+Database.seed/
+Database.bak-*/
+Database.empty-noseed/
+Database.restored-dirty/
+Log/
+Backup/
+Templates/
+fakturamaviews.properties
+logback.xml
+@AutomationLog.txt
+
+# Diagnostic captures produced by FAKTURAMA_DIAGNOSTICS=1
+diagnostics/
+diagnostics.prev/
+
+# Scratch UI-mapping helpers, superseded by src/grounding.py and tools/
+inspector.py
+ui_mapper.py
+
+# The assignment brief itself is not part of the deliverable
+Take home project 2026.pdf
+
+# Editor / agent local state
+.claude/
+logback.xml.template

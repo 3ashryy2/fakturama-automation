@@ -1,70 +1,110 @@
-import os
-from PIL import Image
-from google import genai
-from models import SalesOrder
-from dotenv import load_dotenv
+"""
+Image -> SalesOrder via a multimodal LLM with an enforced response schema.
 
-# Load environment variables from the .env file
+The prompt asks for transcription only. Anything that can be derived -- line
+totals, gross prices, payment codes -- is computed in models.py instead, so a
+model that is good at reading and mediocre at arithmetic cannot corrupt the
+numbers that get written into Fakturama.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from google import genai
+from PIL import Image
+
+from models import SalesOrder
+
 load_dotenv()
 
-# Initialize the modern Google GenAI Client
-# Ensure your GOOGLE_API_KEY environment variable is set.
-client = genai.Client()
+DEFAULT_MODEL = os.getenv("EXTRACTION_MODEL", "gemini-3.6-flash")
 
-def extract_sales_order(image_path: str) -> SalesOrder:
-    """
-    Passes the order image to Gemini and returns a validated SalesOrder Pydantic object.
-    """
-    print(f"[Extractor] Processing image: {image_path}")
-    
-    # 1. Load the multimodal input
-    order_image = Image.open(image_path)
+EXTRACTION_PROMPT = """
+You are a data-entry assistant transcribing a sales order document into JSON.
 
-    # 2. Define the strict instruction prompt
-    extraction_prompt = """
-    You are an expert data extraction assistant for an ERP system. 
-    Analyze the provided invoice/order image and extract all transactional data exactly as it appears, but format it to match the requested JSON schema.
-    
-    Apply the following strict business logic during extraction:
-    
-    1. Addresses: Split the single-line address blocks into their respective components (Street, ZIP, City, Country). 
-    2. Names: Split the Contact Name into first and last name variables.
-    3. Discount: If no line-item discount is explicitly shown, set the discount to 0.
-    4. VAT: Extract the VAT percentage as a whole number (e.g., for 19%, output 19).
-    5. Payment Method: Standardize the extracted payment method if it matches these exact phrases[cite: 1, 2]:
-        - If the image says "Bank Transfer", output "Credit transfer"
-        - If the image says "Credit Card", output "Credit card"
-        - If the image says "SEPA Direct Debit", output "SEPA direct debit"
-    6. Currency: Disregard currency symbols; output numerical values as floats.
-    """
+Transcribe only. Do not compute, infer, or correct anything.
 
-    # 3. Call the Gemini API with structured outputs
-    chat = client.chats.create(model='gemini-3.6-flash')
-    response = chat.send_message(
-        message=[order_image, extraction_prompt],
+Rules:
+1. Copy every value exactly as printed. If a field is absent, use null.
+2. Payment method: copy the printed text verbatim -- "Bank Transfer" stays
+   "Bank Transfer". Do NOT translate it into an accounting code.
+3. Paid status: copy verbatim, e.g. "PAID" or "UNPAID".
+4. Addresses: split each printed block into street, zip_code, city, country.
+   If a block's first line differs from the company name, put that first line
+   in additional_name.
+5. Contact name: split into first and last name.
+6. VAT: whole number only (19% -> 19). Discount likewise (10% -> 10, none -> 0).
+7. source_line_total: the line total exactly as printed in the items table.
+8. Money: numeric only, no currency symbols or thousands separators.
+9. Dates: ISO YYYY-MM-DD.
+10. Return every item row, in the order printed.
+"""
+
+
+def extract_sales_order(image_path: str | Path, model: str = DEFAULT_MODEL) -> SalesOrder:
+    """Extract and validate a SalesOrder from an order image."""
+    path = Path(image_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Order image not found: {path}")
+
+    print(f"[extract] reading {path.name} with {model}")
+    image = Image.open(path)
+
+    client = genai.Client()
+    response = client.models.generate_content(
+        model=model,
+        contents=[image, EXTRACTION_PROMPT],
         config={
             "response_mime_type": "application/json",
             "response_schema": SalesOrder,
             "temperature": 0.0,
-        }
+        },
     )
 
-    # 4. The response.parsed field automatically returns the validated Pydantic object!
-    extracted_order: SalesOrder = response.parsed
-    
-    print(f"[Extractor] Successfully extracted Order Ref: {extracted_order.external_reference}")
-    return extracted_order
+    order: SalesOrder | None = response.parsed
+    if order is None:
+        raise ValueError(f"Model returned unparseable output: {response.text[:400]}")
+
+    problems = order.reconcile()
+    if problems:
+        raise ValueError(
+            "Extraction failed arithmetic reconciliation:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+    print(
+        f"[extract] {order.external_reference} | {order.company} | "
+        f"{len(order.items)} item(s) | net {order.computed_net:.2f}"
+    )
+    return order
+
+
+def load_cached(path: str | Path) -> SalesOrder:
+    """Rehydrate a previously saved extraction, for offline UI runs."""
+    return SalesOrder.model_validate(json.loads(Path(path).read_text("utf-8")))
+
 
 if __name__ == "__main__":
-    # Test the extraction layer in isolation
-    try:
-        sample_order = extract_sales_order("tests/test_order.png")
-        print(f"Company: {sample_order.company}")
-        print(f"Items found: {len(sample_order.items)}")
-        
-        # Verify our Pydantic validator calculated the Gross Master Price successfully
-        for item in sample_order.items:
-            print(f"SKU: {item.sku} | Calculated Master Gross Price: {item.calculated_gross_price}")
-            
-    except Exception as e:
-        print(f"Extraction failed: {e}")
+    import sys
+
+    target = sys.argv[1] if len(sys.argv) > 1 else "../tests/test_order.PNG"
+    order = extract_sales_order(target)
+
+    print(f"\nOrder date  : {order.order_date} -> UI {order.ui_order_date!r}")
+    print(f"Payment     : {order.payment_info.method!r} "
+          f"-> code {order.payment_info.payment_code!r}")
+    print(f"Paid        : {order.payment_info.is_paid} on {order.payment_info.paid_on}")
+    print(f"Delivery==billing: {order.delivery_same_as_billing}")
+    print(f"VAT rates   : {order.vat_rates}")
+    for item in order.items:
+        print(
+            f"  {item.sku:<14} {item.vat_name:<9} "
+            f"master gross {item.master_gross_price:>8.2f}  "
+            f"line net {item.line_net_total:>8.2f}"
+        )
+    print(f"Totals      : net {order.computed_net:.2f} / "
+          f"vat {order.computed_vat:.2f} / gross {order.computed_gross:.2f}")
